@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "kinara.9router",
+  "name": "9Router AI Monitor",
+  "version": "1.0.0",
+  "author": "kinara",
+  "license": "MIT",
+  "description": "9Router AI Infrastructure status, registered provider accounts, and live quota usage for Omarchy Quickshell.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "9Router",
+    "description": "9Router AI Infrastructure status and provider accounts quota/usage",
+    "category": "AI",
+    "aliases": [
+      "9router",
+      "router"
+    ]
+  }
+}

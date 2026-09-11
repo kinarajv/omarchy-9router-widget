@@ -1,0 +1,7 @@
+*.o
+fetch.o
+__pycache__/
+*.pyc
+*.swp
+*~
+.DS_Store

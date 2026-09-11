@@ -43,34 +43,95 @@ fn accountLessThan(_: void, a: Account, b: Account) bool {
     return a.tokens > b.tokens;
 }
 
+fn readFileAlloc(allocator: std.mem.Allocator, path: [*:0]const u8) ?[]u8 {
+    const f = fopen(path, "rb") orelse return null;
+    defer _ = fclose(f);
+
+    var buf: std.ArrayList(u8) = .empty;
+    var chunk: [4096]u8 = undefined;
+    while (true) {
+        const n = fread(&chunk, 1, chunk.len, f);
+        if (n == 0) break;
+        buf.appendSlice(allocator, chunk[0..n]) catch return null;
+    }
+    return buf.items;
+}
+
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
+    const home = getenv("HOME") orelse ".";
 
-    const default_cmd =
-        \\ssh -o ConnectTimeout=3 -o BatchMode=yes root@192.168.0.2 "pct exec 109 -- python3 - <<'PY'
-        \\import sqlite3, json, datetime
-        \\db = '/var/lib/docker/volumes/9router-data/_data/db/data.sqlite'
-        \\conn = sqlite3.connect(db)
-        \\today = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
-        \\row = conn.execute('SELECT data FROM usageDaily WHERE dateKey=?', (today,)).fetchone()
-        \\daily = json.loads(row[0]) if row else {}
-        \\conns = conn.execute('SELECT id, provider, name, email, priority, isActive, data FROM providerConnections').fetchall()
-        \\out = {'today': today, 'daily': daily, 'connections': []}
-        \\for c in conns:
-        \\    d = json.loads(c[6]) if c[6] else {}
-        \\    out['connections'].append({
-        \\        'id': c[0], 'provider': c[1], 'name': c[2], 'email': c[3],
-        \\        'priority': c[4], 'isActive': bool(c[5]),
-        \\        'testStatus': d.get('testStatus'), 'errorCode': d.get('errorCode'),
-        \\        'lastError': d.get('lastError'), 'lastErrorAt': d.get('lastErrorAt'),
-        \\        'locks': {k: v for k, v in d.items() if k.startswith('modelLock_') and v is not None}
-        \\    })
-        \\print(json.dumps(out))
-        \\PY"
-    ;
+    var ssh_target: []const u8 = "root@192.168.0.2";
+    var lxc_id: []const u8 = "109";
+    var db_path: []const u8 = "/var/lib/docker/volumes/9router-data/_data/db/data.sqlite";
+    var dashboard_url: []const u8 = "http://192.168.0.44:20128/dashboard";
+    var gateway_host: []const u8 = "192.168.0.44:20128";
+    var custom_fetch_cmd: ?[]const u8 = null;
 
-    const custom_cmd = getenv("ROUTER_FETCH_CMD");
-    const cmd_to_run = if (custom_cmd) |c| std.mem.span(c) else default_cmd;
+    const global_cfg_path = try std.fmt.allocPrint(allocator, "{s}/.config/omarchy/9router.json", .{home});
+    const global_cfg_z = try allocator.dupeZ(u8, global_cfg_path);
+    const cfg_raw = readFileAlloc(allocator, "config.json") orelse readFileAlloc(allocator, global_cfg_z.ptr);
+
+    if (cfg_raw) |raw| {
+        if (std.json.parseFromSlice(std.json.Value, allocator, raw, .{})) |parsed_cfg| {
+            defer parsed_cfg.deinit();
+            if (parsed_cfg.value == .object) {
+                const o = parsed_cfg.value.object;
+                if (o.get("sshTarget")) |v| {
+                    if (v == .string) ssh_target = v.string;
+                }
+                if (o.get("lxcId")) |v| {
+                    if (v == .string) lxc_id = v.string;
+                }
+                if (o.get("dbPath")) |v| {
+                    if (v == .string) db_path = v.string;
+                }
+                if (o.get("dashboardUrl")) |v| {
+                    if (v == .string) dashboard_url = v.string;
+                }
+                if (o.get("gatewayHost")) |v| {
+                    if (v == .string) gateway_host = v.string;
+                }
+                if (o.get("fetchCmd")) |v| {
+                    if (v == .string and v.string.len > 0) custom_fetch_cmd = v.string;
+                }
+            }
+        } else |_| {}
+    }
+
+    if (getenv("ROUTER_SSH_TARGET")) |v| ssh_target = std.mem.span(v);
+    if (getenv("ROUTER_LXC_ID")) |v| lxc_id = std.mem.span(v);
+    if (getenv("ROUTER_DB_PATH")) |v| db_path = std.mem.span(v);
+    if (getenv("ROUTER_DASHBOARD_URL")) |v| dashboard_url = std.mem.span(v);
+    if (getenv("ROUTER_GATEWAY_HOST")) |v| gateway_host = std.mem.span(v);
+    if (getenv("ROUTER_FETCH_CMD")) |v| custom_fetch_cmd = std.mem.span(v);
+
+    const cmd_to_run = if (custom_fetch_cmd) |cmd|
+        cmd
+    else
+        try std.fmt.allocPrint(allocator,
+            \\ssh -o ConnectTimeout=3 -o BatchMode=yes {s} "pct exec {s} -- python3 - <<'PY'
+            \\import sqlite3, json, datetime
+            \\db = '{s}'
+            \\conn = sqlite3.connect(db)
+            \\today = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
+            \\row = conn.execute('SELECT data FROM usageDaily WHERE dateKey=?', (today,)).fetchone()
+            \\daily = json.loads(row[0]) if row else {{}}
+            \\conns = conn.execute('SELECT id, provider, name, email, priority, isActive, data FROM providerConnections').fetchall()
+            \\out = {{'today': today, 'daily': daily, 'connections': []}}
+            \\for c in conns:
+            \\    d = json.loads(c[6]) if c[6] else {{}}
+            \\    out['connections'].append({{
+            \\        'id': c[0], 'provider': c[1], 'name': c[2], 'email': c[3],
+            \\        'priority': c[4], 'isActive': bool(c[5]),
+            \\        'testStatus': d.get('testStatus'), 'errorCode': d.get('errorCode'),
+            \\        'lastError': d.get('lastError'), 'lastErrorAt': d.get('lastErrorAt'),
+            \\        'locks': {{k: v for k, v in d.items() if k.startswith('modelLock_') and v is not None}}
+            \\    }})
+            \\print(json.dumps(out))
+            \\PY"
+        , .{ ssh_target, lxc_id, db_path });
+
     const cmd_z = try allocator.dupeZ(u8, cmd_to_run);
 
     const stream = popen(cmd_z.ptr, "r") orelse {
@@ -231,9 +292,6 @@ pub fn main() !void {
 
     const bar_text = try std.fmt.allocPrint(allocator, "{s}", .{total_tokens_fmt});
 
-    const dash_env = getenv("ROUTER_DASHBOARD_URL");
-    const dash_url = if (dash_env) |u| std.mem.span(u) else "http://192.168.0.44:20128/dashboard";
-
     var out_buf: std.ArrayList(u8) = .empty;
     defer out_buf.deinit(allocator);
 
@@ -243,6 +301,7 @@ pub fn main() !void {
         \\  "today": "{s}",
         \\  "barText": "{s}",
         \\  "dashboardUrl": "{s}",
+        \\  "gatewayHost": "{s}",
         \\  "totals": {{
         \\    "requests": {d},
         \\    "promptTokens": {d},
@@ -258,7 +317,8 @@ pub fn main() !void {
     , .{
         today_str,
         bar_text,
-        dash_url,
+        dashboard_url,
+        gateway_host,
         total_requests,
         prompt_tokens,
         comp_tokens,
@@ -312,7 +372,6 @@ pub fn main() !void {
         \\}
     );
 
-    const home = getenv("HOME") orelse ".";
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/.local/state/omarchy/9router", .{home});
     const target_path = try std.fmt.allocPrint(allocator, "{s}/usage.json", .{dir_path});
     const tmp_path = try std.fmt.allocPrint(allocator, "{s}/usage.json.tmp", .{dir_path});

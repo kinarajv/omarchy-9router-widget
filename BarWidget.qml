@@ -89,7 +89,7 @@ Panel {
     verticalPadding: 6
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.RightButton) {
-        if (root.bar) root.bar.run("xdg-open " + (root.statusData.dashboardUrl || "http://192.168.0.44:20128/dashboard"))
+        if (root.bar) root.bar.run("xdg-open " + (root.statusData.dashboardUrl || "http://localhost:20128/dashboard"))
       } else {
         root.toggle()
       }
@@ -149,7 +149,7 @@ Panel {
                 font.bold: true
               }
               Text {
-                text: "192.168.0.44:20128 · " + (root.statusData.online ? "Online" : "Connecting...")
+                text: (root.statusData.gatewayHost ? root.statusData.gatewayHost : "9Router Gateway") + " · " + (root.statusData.online ? "Online" : "Connecting...")
                 color: root.statusData.online ? "#44cc66" : root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -332,7 +332,7 @@ Panel {
               width: (parent.width - Style.spacing.md) / 2
               text: "Open Web Dashboard"
               onClicked: {
-                if (root.bar) root.bar.run("xdg-open " + (root.statusData.dashboardUrl || "http://192.168.0.44:20128/dashboard"))
+                if (root.bar) root.bar.run("xdg-open " + (root.statusData.dashboardUrl || "http://localhost:20128/dashboard"))
                 root.close()
               }
             }

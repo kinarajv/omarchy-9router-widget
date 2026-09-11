@@ -1,0 +1,8 @@
+{
+  "mode": "ssh",
+  "sshTarget": "root@192.168.0.2",
+  "lxcId": "109",
+  "dbPath": "/var/lib/docker/volumes/9router-data/_data/db/data.sqlite",
+  "dashboardUrl": "http://192.168.0.44:20128/dashboard",
+  "gatewayHost": "192.168.0.44:20128"
+}

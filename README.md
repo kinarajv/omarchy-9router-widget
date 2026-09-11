@@ -21,7 +21,7 @@ When orchestrating multi-model AI coding agents (such as Hermes, Codex, Claude C
 
 ### Top Bar Item
 - **Left-click**: Toggles the interactive 9Router dashboard flyout panel.
-- **Right-click**: Opens the full 9Router Web Dashboard in your default browser.
+- **Right-click**: Opens the 9Router Web Dashboard in your default browser.
 - **Tooltip**: Displays an immediate summary of online connectivity, today's request count, total tokens, and enabled provider breakdowns.
 
 ### Flyout Panel Components
@@ -44,6 +44,77 @@ When orchestrating multi-model AI coding agents (such as Hermes, Codex, Claude C
 
 ---
 
+## Configuration Guide
+
+The widget supports flexible configuration via a local JSON file, a global user config, or shell environment variables.
+
+### Configuration File Locations
+
+The fetcher checks configuration in the following order of priority:
+1. Environment variables (highest priority)
+2. Plugin-local config: `~/.config/omarchy/plugins/kinara.9router/config.json`
+3. Global user config: `~/.config/omarchy/9router.json`
+
+To set up your configuration, copy `config.example.json`:
+
+```bash
+cp config.example.json config.json
+```
+
+### Configuration Options Reference
+
+| Key | Environment Variable | Default Value | Description |
+| :--- | :--- | :--- | :--- |
+| `mode` | `ROUTER_MODE` | `"ssh"` | Polling mode: `"ssh"` for remote hosts, `"local"` for local SQLite DB |
+| `sshTarget` | `ROUTER_SSH_TARGET` | `"user@router-host"` | SSH destination (`user@host` or SSH alias) |
+| `lxcId` | `ROUTER_LXC_ID` | `"109"` | Proxmox LXC container identifier running 9Router |
+| `dbPath` | `ROUTER_DB_PATH` | `/var/lib/docker/volumes/9router-data/_data/db/data.sqlite` | Absolute path to the 9Router SQLite database file |
+| `dashboardUrl` | `ROUTER_DASHBOARD_URL` | `http://router-host:20128/dashboard` | Web dashboard URL opened on click |
+| `gatewayHost` | `ROUTER_GATEWAY_HOST` | `"router-host:20128"` | Subtitle display label shown in the panel header |
+| `fetchCmd` | `ROUTER_FETCH_CMD` | `""` | Optional raw command override that outputs JSON to stdout |
+
+---
+
+### Configuration Examples
+
+#### Example A: Remote Proxmox LXC Container (Default)
+When 9Router is deployed inside a Proxmox LXC container accessible via SSH:
+
+```json
+{
+  "mode": "ssh",
+  "sshTarget": "root@192.168.0.2",
+  "lxcId": "109",
+  "dbPath": "/var/lib/docker/volumes/9router-data/_data/db/data.sqlite",
+  "dashboardUrl": "http://192.168.0.44:20128/dashboard",
+  "gatewayHost": "192.168.0.44:20128"
+}
+```
+
+#### Example B: Local Docker / Native Service
+When 9Router runs on the same machine as your desktop:
+
+```json
+{
+  "mode": "local",
+  "dbPath": "/var/lib/docker/volumes/9router-data/_data/db/data.sqlite",
+  "dashboardUrl": "http://localhost:20128/dashboard",
+  "gatewayHost": "localhost:20128"
+}
+```
+
+#### Example C: Environment Variables in `~/.config/environment.d/9router.conf`
+For systemd user sessions without creating a JSON file:
+
+```ini
+ROUTER_SSH_TARGET="root@192.168.0.2"
+ROUTER_LXC_ID="109"
+ROUTER_DASHBOARD_URL="http://192.168.0.44:20128/dashboard"
+ROUTER_GATEWAY_HOST="192.168.0.44:20128"
+```
+
+---
+
 ## Installation & Setup
 
 ### 1. Clone into Omarchy Plugin Directory
@@ -54,24 +125,22 @@ git clone https://github.com/kinarajv/omarchy-9router-widget.git ~/.config/omarc
 cd ~/.config/omarchy/plugins/kinara.9router
 ```
 
-### 2. Build the Fetch Runner
-Build the standalone Zig binary:
+### 2. Configure Settings
+Copy and edit your configuration:
+
+```bash
+cp config.example.json config.json
+nano config.json
+```
+
+### 3. Build the Fetch Runner
+Compile the native Zig poller:
 
 ```bash
 ./build.sh
 ```
 
 If Zig is not installed on your system, `build.sh` automatically falls back to the Python runner (`fetch.py`).
-
-### 3. Configure Connection Environment (Optional)
-By default, the script polls the gateway database over SSH. You can customize connection parameters by setting environment variables in `~/.config/environment.d/9router.conf` or your shell profile:
-
-| Variable | Description | Default |
-| :--- | :--- | :--- |
-| `ROUTER_FETCH_CMD` | Custom shell command that outputs the JSON payload | SSH Proxmox/Docker command |
-| `ROUTER_SSH_TARGET` | SSH connection string for the container host | `root@192.168.0.2` |
-| `ROUTER_LXC_ID` | Proxmox LXC container identifier | `109` |
-| `ROUTER_DASHBOARD_URL` | Destination URL opened on click | `http://192.168.0.44:20128/dashboard` |
 
 ### 4. Add to Omarchy Top Bar
 Open `~/.config/omarchy/shell.json` and insert `kinara.9router` into your bar configuration:
@@ -100,19 +169,19 @@ quickshell ipc -p /usr/share/omarchy/shell call kinara.9router open 2>/dev/null 
 
 ## Verification & Health Check
 
-### Test Background Polling
-Run the fetch binary directly in your terminal:
+### Test Polling Execution
+Run the fetch executable directly from your terminal:
 
 ```bash
 ~/.config/omarchy/plugins/kinara.9router/fetch
 ```
 
-Expected JSON output:
+Expected output:
 ```json
-{"status":"ok","barText":"391.3M","accounts":9}
+{"status":"ok","barText":"401.2M","accounts":9}
 ```
 
-Check the generated state cache file:
+Check the generated state cache:
 ```bash
 cat ~/.local/state/omarchy/9router/usage.json | head -n 30
 ```
@@ -122,19 +191,22 @@ cat ~/.local/state/omarchy/9router/usage.json | head -n 30
 ## Troubleshooting
 
 ### Widget shows "󰒋" without numbers
-- Cause: The state file `~/.local/state/omarchy/9router/usage.json` has not been generated yet or SSH timed out.
-- Recovery: Run `./fetch` manually in terminal and check the output or error messages.
+- Cause: The state file `~/.local/state/omarchy/9router/usage.json` has not been generated yet or connection timed out.
+- Recovery: Run `./fetch` manually in terminal to observe the exact error.
 
 ### Permission Denied on SSH
-- Cause: SSH public key is not trusted on the Proxmox/router host.
-- Recovery: Add your public key to the target host using `ssh-copy-id root@<host>`.
+- Cause: SSH public key authentication is not configured for the target host.
+- Recovery: Authorize your SSH key on the router host:
+  ```bash
+  ssh-copy-id <user>@<router-host>
+  ```
 
 ---
 
 ## Uninstallation
 
 1. Remove `kinara.9router` from `~/.config/omarchy/shell.json`.
-2. Delete the plugin folder:
+2. Delete the plugin directory:
    ```bash
    rm -rf ~/.config/omarchy/plugins/kinara.9router
    ```

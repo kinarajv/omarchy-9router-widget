@@ -39,14 +39,14 @@ When orchestrating multi-model AI coding agents (such as Hermes, Codex, Claude C
 ## Prerequisites
 
 - **Desktop**: Omarchy Linux with `omarchy-shell` / `quickshell`.
-- **Compiler (Optional for build)**: `zig` 0.13+ or 0.16+ (a precompiled executable and Python fallback are included).
-- **Network**: SSH access or local access to the host running the 9Router SQLite database.
+- **Compiler (Optional for build)**: `zig` 0.13+ or 0.14+ (a precompiled executable is included).
+- **Network**: HTTP access to the 9Router API endpoint.
 
 ---
 
 ## Configuration Guide
 
-The widget supports flexible configuration via a local JSON file, a global user config, or shell environment variables.
+The widget reads usage through the 9Router HTTP API. It supports configuration via a local JSON file, a global user config, or shell environment variables.
 
 ### Configuration File Locations
 
@@ -65,52 +65,25 @@ cp config.example.json config.json
 
 | Key | Environment Variable | Default Value | Description |
 | :--- | :--- | :--- | :--- |
-| `mode` | `ROUTER_MODE` | `"ssh"` | Polling mode: `"ssh"` for remote hosts, `"local"` for local SQLite DB |
-| `sshTarget` | `ROUTER_SSH_TARGET` | `"user@router-host"` | SSH destination (`user@host` or SSH alias) |
-| `lxcId` | `ROUTER_LXC_ID` | `"109"` | Proxmox LXC container identifier running 9Router |
-| `dbPath` | `ROUTER_DB_PATH` | `/var/lib/docker/volumes/9router-data/_data/db/data.sqlite` | Absolute path to the 9Router SQLite database file |
-| `dashboardUrl` | `ROUTER_DASHBOARD_URL` | `http://router-host:20128/dashboard` | Web dashboard URL opened on click |
-| `gatewayHost` | `ROUTER_GATEWAY_HOST` | `"router-host:20128"` | Subtitle display label shown in the panel header |
-| `fetchCmd` | `ROUTER_FETCH_CMD` | `""` | Optional raw command override that outputs JSON to stdout |
+| `target` | `ROUTER_TARGET` | `http://127.0.0.1:20128` | 9Router gateway host or base URL |
+| `password` | `ROUTER_PASSWORD` | `""` | Dashboard login password used to auto-renew session token |
 
 ---
 
-### Configuration Examples
-
-#### Example A: Remote Proxmox LXC Container (Default)
-When 9Router is deployed inside a Proxmox LXC container accessible via SSH:
+### Configuration Example
 
 ```json
 {
-  "mode": "ssh",
-  "sshTarget": "root@192.168.0.2",
-  "lxcId": "109",
-  "dbPath": "/var/lib/docker/volumes/9router-data/_data/db/data.sqlite",
-  "dashboardUrl": "http://192.168.0.44:20128/dashboard",
-  "gatewayHost": "192.168.0.44:20128"
+  "target": "http://127.0.0.1:20128",
+  "password": "your-9router-password"
 }
 ```
 
-#### Example B: Local Docker / Native Service
-When 9Router runs on the same machine as your desktop:
-
-```json
-{
-  "mode": "local",
-  "dbPath": "/var/lib/docker/volumes/9router-data/_data/db/data.sqlite",
-  "dashboardUrl": "http://localhost:20128/dashboard",
-  "gatewayHost": "localhost:20128"
-}
-```
-
-#### Example C: Environment Variables in `~/.config/environment.d/9router.conf`
-For systemd user sessions without creating a JSON file:
+#### Environment Variables in `~/.config/environment.d/9router.conf`
 
 ```ini
-ROUTER_SSH_TARGET="root@192.168.0.2"
-ROUTER_LXC_ID="109"
-ROUTER_DASHBOARD_URL="http://192.168.0.44:20128/dashboard"
-ROUTER_GATEWAY_HOST="192.168.0.44:20128"
+ROUTER_TARGET="http://127.0.0.1:20128"
+ROUTER_PASSWORD="your-9router-password"
 ```
 
 ---
@@ -140,7 +113,7 @@ Compile the native Zig poller:
 ./build.sh
 ```
 
-If Zig is not installed on your system, `build.sh` automatically falls back to the Python runner (`fetch.py`).
+Run `./build.sh` to compile `fetch.zig` using Zig.
 
 ### 4. Add to Omarchy Top Bar
 Open `~/.config/omarchy/shell.json` and insert `kinara.9router` into your bar configuration:
@@ -194,12 +167,9 @@ cat ~/.local/state/omarchy/9router/usage.json | head -n 30
 - Cause: The state file `~/.local/state/omarchy/9router/usage.json` has not been generated yet or connection timed out.
 - Recovery: Run `./fetch` manually in terminal to observe the exact error.
 
-### Permission Denied on SSH
-- Cause: SSH public key authentication is not configured for the target host.
-- Recovery: Authorize your SSH key on the router host:
-  ```bash
-  ssh-copy-id <user>@<router-host>
-  ```
+### API returns `401 Unauthorized`
+- Cause: 9Router authentication is enabled.
+- Recovery: configure `ROUTER_API_TOKEN`, `ROUTER_API_KEY`, or `ROUTER_API_COOKIE`, then run the fetcher again.
 
 ---
 

@@ -1,15 +1,5 @@
 const std = @import("std");
 
-extern "c" fn popen(command: [*:0]const u8, modes: [*:0]const u8) ?*anyopaque;
-extern "c" fn pclose(stream: *anyopaque) c_int;
-extern "c" fn fread(ptr: *anyopaque, size: usize, nmemb: usize, stream: *anyopaque) usize;
-extern "c" fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
-extern "c" fn fwrite(ptr: *const anyopaque, size: usize, nmemb: usize, stream: *anyopaque) usize;
-extern "c" fn fclose(stream: *anyopaque) c_int;
-extern "c" fn rename(old: [*:0]const u8, new: [*:0]const u8) c_int;
-extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
-extern "c" fn mkdir(path: [*:0]const u8, mode: c_uint) c_int;
-
 const Account = struct {
     id: []const u8,
     provider: []const u8,
@@ -22,6 +12,11 @@ const Account = struct {
     tokens: i64,
     cost: f64,
 };
+
+fn accountLessThan(_: void, a: Account, b: Account) bool {
+    if (a.requests != b.requests) return a.requests > b.requests;
+    return a.tokens > b.tokens;
+}
 
 fn formatTokens(allocator: std.mem.Allocator, num: i64) ![]const u8 {
     const f = @as(f64, @floatFromInt(num));
@@ -36,271 +31,356 @@ fn formatTokens(allocator: std.mem.Allocator, num: i64) ![]const u8 {
     }
 }
 
-fn accountLessThan(_: void, a: Account, b: Account) bool {
-    if (a.requests != b.requests) {
-        return a.requests > b.requests;
-    }
-    return a.tokens > b.tokens;
+fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
+    const file = std.fs.cwd().openFile(path, .{}) catch return null;
+    defer file.close();
+    return file.readToEndAlloc(allocator, 10 * 1024 * 1024) catch return null;
 }
 
-fn readFileAlloc(allocator: std.mem.Allocator, path: [*:0]const u8) ?[]u8 {
-    const f = fopen(path, "rb") orelse return null;
-    defer _ = fclose(f);
+fn writeFile(path: []const u8, data: []const u8) !void {
+    const file = try std.fs.cwd().createFile(path, .{});
+    defer file.close();
+    try file.writeAll(data);
+}
 
-    var buf: std.ArrayList(u8) = .empty;
-    var chunk: [4096]u8 = undefined;
-    while (true) {
-        const n = fread(&chunk, 1, chunk.len, f);
-        if (n == 0) break;
-        buf.appendSlice(allocator, chunk[0..n]) catch return null;
+const Config = struct {
+    target: []const u8,
+    password: []const u8,
+};
+
+fn loadConfig(allocator: std.mem.Allocator, home: []const u8, exe_dir: ?[]const u8) !Config {
+    var target: []const u8 = "";
+    var password: []const u8 = "";
+
+    var paths = std.ArrayList([]const u8).init(allocator);
+    defer paths.deinit();
+
+    try paths.append(try std.fmt.allocPrint(allocator, "{s}/.config/omarchy/9router.json", .{home}));
+    if (exe_dir) |ed| {
+        try paths.append(try std.fmt.allocPrint(allocator, "{s}/config.json", .{ed}));
     }
-    return buf.items;
+    try paths.append("config.json");
+
+    for (paths.items) |p| {
+        if (p.len == 0) continue;
+        if (readFileAlloc(allocator, p)) |raw| {
+            var parsed = std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch continue;
+            defer parsed.deinit();
+            if (parsed.value == .object) {
+                const obj = parsed.value.object;
+                if (obj.get("target")) |v| {
+                    if (v == .string and v.string.len > 0) {
+                        target = try allocator.dupe(u8, v.string);
+                    }
+                }
+                if (obj.get("password")) |v| {
+                    if (v == .string) {
+                        password = try allocator.dupe(u8, v.string);
+                    }
+                }
+            }
+        }
+    }
+
+    if (std.posix.getenv("ROUTER_TARGET")) |v| target = try allocator.dupe(u8, v);
+    if (std.posix.getenv("ROUTER_PASSWORD")) |v| password = try allocator.dupe(u8, v);
+
+    return .{ .target = target, .password = password };
+}
+
+fn normalizeBaseUrl(allocator: std.mem.Allocator, target: []const u8) ![]const u8 {
+    const has_scheme = std.mem.startsWith(u8, target, "http://") or std.mem.startsWith(u8, target, "https://");
+    const clean_raw = if (has_scheme)
+        try allocator.dupe(u8, target)
+    else
+        try std.fmt.allocPrint(allocator, "http://{s}", .{target});
+
+    var clean = clean_raw;
+    if (std.mem.endsWith(u8, clean, "/")) {
+        clean = clean[0 .. clean.len - 1];
+    }
+
+    const after_scheme = if (std.mem.startsWith(u8, clean, "https://"))
+        clean[8..]
+    else if (std.mem.startsWith(u8, clean, "http://"))
+        clean[7..]
+    else
+        clean;
+
+    const host_part = if (std.mem.indexOfScalar(u8, after_scheme, '/')) |idx|
+        after_scheme[0..idx]
+    else
+        after_scheme;
+
+    if (std.mem.indexOfScalar(u8, host_part, ':') == null) {
+        return try std.fmt.allocPrint(allocator, "{s}:20128", .{clean});
+    }
+    return clean;
+}
+
+fn extractHost(target: []const u8) []const u8 {
+    var host = target;
+    if (std.mem.startsWith(u8, host, "http://")) {
+        host = host[7..];
+    } else if (std.mem.startsWith(u8, host, "https://")) {
+        host = host[8..];
+    }
+    if (std.mem.indexOfScalar(u8, host, '/')) |idx| {
+        host = host[0..idx];
+    }
+    return host;
 }
 
 pub fn main() !void {
-    const allocator = std.heap.page_allocator;
-    const home = getenv("HOME") orelse ".";
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
-    var ssh_target: []const u8 = "root@192.168.0.2";
-    var lxc_id: []const u8 = "109";
-    var db_path: []const u8 = "/var/lib/docker/volumes/9router-data/_data/db/data.sqlite";
-    var dashboard_url: []const u8 = "http://192.168.0.44:20128/dashboard";
-    var gateway_host: []const u8 = "192.168.0.44:20128";
-    var custom_fetch_cmd: ?[]const u8 = null;
+    const home = std.posix.getenv("HOME") orelse ".";
+    const exe_dir = std.fs.selfExeDirPathAlloc(allocator) catch null;
+    defer if (exe_dir) |ed| allocator.free(ed);
 
-    const global_cfg_path = try std.fmt.allocPrint(allocator, "{s}/.config/omarchy/9router.json", .{home});
-    const global_cfg_z = try allocator.dupeZ(u8, global_cfg_path);
-    const cfg_raw = readFileAlloc(allocator, "config.json") orelse readFileAlloc(allocator, global_cfg_z.ptr);
+    const cfg = try loadConfig(allocator, home, exe_dir);
 
-    if (cfg_raw) |raw| {
-        if (std.json.parseFromSlice(std.json.Value, allocator, raw, .{})) |parsed_cfg| {
-            defer parsed_cfg.deinit();
-            if (parsed_cfg.value == .object) {
-                const o = parsed_cfg.value.object;
-                if (o.get("sshTarget")) |v| {
-                    if (v == .string) ssh_target = v.string;
-                }
-                if (o.get("lxcId")) |v| {
-                    if (v == .string) lxc_id = v.string;
-                }
-                if (o.get("dbPath")) |v| {
-                    if (v == .string) db_path = v.string;
-                }
-                if (o.get("dashboardUrl")) |v| {
-                    if (v == .string) dashboard_url = v.string;
-                }
-                if (o.get("gatewayHost")) |v| {
-                    if (v == .string) gateway_host = v.string;
-                }
-                if (o.get("fetchCmd")) |v| {
-                    if (v == .string and v.string.len > 0) custom_fetch_cmd = v.string;
+    const dir_path = try std.fmt.allocPrint(allocator, "{s}/.local/state/omarchy/9router", .{home});
+    std.fs.cwd().makePath(dir_path) catch {};
+
+    const session_path = try std.fmt.allocPrint(allocator, "{s}/session.json", .{dir_path});
+    const usage_path = try std.fmt.allocPrint(allocator, "{s}/usage.json", .{dir_path});
+    const tmp_path = try std.fmt.allocPrint(allocator, "{s}/usage.json.tmp", .{dir_path});
+
+    if (cfg.target.len == 0) {
+        const err_json =
+            \\{
+            \\  "online": false,
+            \\  "source": "api-zig",
+            \\  "error": "Missing target in config.json",
+            \\  "dashboardUrl": "",
+            \\  "gatewayHost": ""
+            \\}
+        ;
+        try writeFile(usage_path, err_json);
+        std.debug.print("{{\"status\":\"error\",\"barText\":\"\",\"accounts\":0,\"error\":\"Missing target in config.json\"}}\n", .{});
+        return;
+    }
+
+    const base_url = try normalizeBaseUrl(allocator, cfg.target);
+    const gateway_host = extractHost(base_url);
+
+    var saved_cookie: []const u8 = "";
+    if (readFileAlloc(allocator, session_path)) |raw| {
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch null;
+        if (parsed) |*p| {
+            defer p.deinit();
+            if (p.value == .object) {
+                if (p.value.object.get("cookie")) |c| {
+                    if (c == .string and c.string.len > 0) {
+                        saved_cookie = try allocator.dupe(u8, c.string);
+                    }
                 }
             }
-        } else |_| {}
+        }
     }
 
-    if (getenv("ROUTER_SSH_TARGET")) |v| ssh_target = std.mem.span(v);
-    if (getenv("ROUTER_LXC_ID")) |v| lxc_id = std.mem.span(v);
-    if (getenv("ROUTER_DB_PATH")) |v| db_path = std.mem.span(v);
-    if (getenv("ROUTER_DASHBOARD_URL")) |v| dashboard_url = std.mem.span(v);
-    if (getenv("ROUTER_GATEWAY_HOST")) |v| gateway_host = std.mem.span(v);
-    if (getenv("ROUTER_FETCH_CMD")) |v| custom_fetch_cmd = std.mem.span(v);
+    var client: std.http.Client = .{ .allocator = allocator };
+    defer client.deinit();
 
-    const cmd_to_run = if (custom_fetch_cmd) |cmd|
-        cmd
-    else
-        try std.fmt.allocPrint(allocator,
-            \\ssh -o ConnectTimeout=3 -o BatchMode=yes {s} "pct exec {s} -- python3 - <<'PY'
-            \\import sqlite3, json, datetime
-            \\db = '{s}'
-            \\conn = sqlite3.connect(db)
-            \\today = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
-            \\row = conn.execute('SELECT data FROM usageDaily WHERE dateKey=?', (today,)).fetchone()
-            \\daily = json.loads(row[0]) if row else {{}}
-            \\conns = conn.execute('SELECT id, provider, name, email, priority, isActive, data FROM providerConnections').fetchall()
-            \\out = {{'today': today, 'daily': daily, 'connections': []}}
-            \\for c in conns:
-            \\    d = json.loads(c[6]) if c[6] else {{}}
-            \\    out['connections'].append({{
-            \\        'id': c[0], 'provider': c[1], 'name': c[2], 'email': c[3],
-            \\        'priority': c[4], 'isActive': bool(c[5]),
-            \\        'testStatus': d.get('testStatus'), 'errorCode': d.get('errorCode'),
-            \\        'lastError': d.get('lastError'), 'lastErrorAt': d.get('lastErrorAt'),
-            \\        'locks': {{k: v for k, v in d.items() if k.startswith('modelLock_') and v is not None}}
-            \\    }})
-            \\print(json.dumps(out))
-            \\PY"
-        , .{ ssh_target, lxc_id, db_path });
+    // If password is configured, attempt login when no saved cookie or if refreshed
+    if (saved_cookie.len == 0 and cfg.password.len > 0) {
+        const login_url = try std.fmt.allocPrint(allocator, "{s}/api/auth/login", .{base_url});
+        const login_body = try std.fmt.allocPrint(allocator, "{{\"password\":\"{s}\"}}", .{cfg.password});
+        var resp_buf = std.ArrayList(u8).init(allocator);
+        defer resp_buf.deinit();
 
-    const cmd_z = try allocator.dupeZ(u8, cmd_to_run);
+        var header_buf: [4096]u8 = undefined;
+        const login_res = client.fetch(.{
+            .location = .{ .url = login_url },
+            .method = .POST,
+            .payload = login_body,
+            .response_storage = .{ .dynamic = &resp_buf },
+            .server_header_buffer = &header_buf,
+            .extra_headers = &.{
+                .{ .name = "Content-Type", .value = "application/json" },
+                .{ .name = "Accept", .value = "application/json" },
+            },
+        }) catch null;
 
-    const stream = popen(cmd_z.ptr, "r") orelse {
-        std.debug.print("Failed to spawn command\n", .{});
-        return error.PopenFailed;
+        if (login_res != null) {
+            const headers_str: []const u8 = &header_buf;
+            if (std.mem.indexOf(u8, headers_str, "auth_token=")) |idx| {
+                const cookie_part = headers_str[idx..];
+                const end_idx = std.mem.indexOfAny(u8, cookie_part, ";\r\n") orelse cookie_part.len;
+                saved_cookie = try allocator.dupe(u8, cookie_part[0..end_idx]);
+                const save_payload = try std.fmt.allocPrint(allocator, "{{\"cookie\":\"{s}\"}}", .{saved_cookie});
+                writeFile(session_path, save_payload) catch {};
+            }
+        }
+    }
+
+    const api_url = try std.fmt.allocPrint(allocator, "{s}/api/usage/stats?period=today", .{base_url});
+    var body_buf = std.ArrayList(u8).init(allocator);
+    defer body_buf.deinit();
+
+    var extra_hdrs = std.ArrayList(std.http.Header).init(allocator);
+    defer extra_hdrs.deinit();
+    try extra_hdrs.append(.{ .name = "Accept", .value = "application/json" });
+    try extra_hdrs.append(.{ .name = "User-Agent", .value = "kinara.9router/1.0" });
+
+    if (saved_cookie.len > 0) {
+        try extra_hdrs.append(.{ .name = "Cookie", .value = saved_cookie });
+    }
+
+    var header_buf: [4096]u8 = undefined;
+    const res = client.fetch(.{
+        .location = .{ .url = api_url },
+        .method = .GET,
+        .response_storage = .{ .dynamic = &body_buf },
+        .server_header_buffer = &header_buf,
+        .extra_headers = extra_hdrs.items,
+    }) catch |err| {
+        const err_json = try std.fmt.allocPrint(allocator,
+            \\{{
+            \\  "online": false,
+            \\  "source": "api-zig",
+            \\  "error": "Connection error: {s}",
+            \\  "dashboardUrl": "{s}/dashboard",
+            \\  "gatewayHost": "{s}"
+            \\}}
+        , .{ @errorName(err), base_url, gateway_host });
+        try writeFile(usage_path, err_json);
+        std.debug.print("{{\"status\":\"error\",\"barText\":\"\",\"accounts\":0,\"error\":\"{s}\"}}\n", .{@errorName(err)});
+        return;
     };
-    defer _ = pclose(stream);
 
-    var raw_buf: std.ArrayList(u8) = .empty;
-    defer raw_buf.deinit(allocator);
-
-    var chunk: [8192]u8 = undefined;
-    while (true) {
-        const bytes_read = fread(&chunk, 1, chunk.len, stream);
-        if (bytes_read == 0) break;
-        try raw_buf.appendSlice(allocator, chunk[0..bytes_read]);
+    if (res.status != .ok) {
+        const err_json = try std.fmt.allocPrint(allocator,
+            \\{{
+            \\  "online": false,
+            \\  "source": "api-zig",
+            \\  "error": "HTTP {d}",
+            \\  "dashboardUrl": "{s}/dashboard",
+            \\  "gatewayHost": "{s}"
+            \\}}
+        , .{ @intFromEnum(res.status), base_url, gateway_host });
+        try writeFile(usage_path, err_json);
+        std.debug.print("{{\"status\":\"error\",\"barText\":\"\",\"accounts\":0,\"error\":\"HTTP {d}\"}}\n", .{@intFromEnum(res.status)});
+        return;
     }
 
-    if (raw_buf.items.len == 0) {
-        std.debug.print("Empty response from command\n", .{});
-        return error.EmptyResponse;
-    }
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, raw_buf.items, .{});
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, body_buf.items, .{}) catch {
+        std.debug.print("{{\"status\":\"error\",\"barText\":\"\",\"accounts\":0,\"error\":\"Bad JSON\"}}\n", .{});
+        return;
+    };
     defer parsed.deinit();
 
-    const root_obj = parsed.value.object;
-    const today_str = if (root_obj.get("today")) |t| (if (t == .string) t.string else "today") else "today";
+    if (parsed.value != .object) {
+        std.debug.print("{{\"status\":\"error\",\"barText\":\"\",\"accounts\":0,\"error\":\"Non-object JSON\"}}\n", .{});
+        return;
+    }
 
+    const root = parsed.value.object;
     var total_requests: i64 = 0;
     var prompt_tokens: i64 = 0;
     var comp_tokens: i64 = 0;
     var cached_tokens: i64 = 0;
     var total_cost: f64 = 0.0;
 
-    var by_account_map: ?std.json.ObjectMap = null;
-
-    if (root_obj.get("daily")) |d_val| {
-        if (d_val == .object) {
-            const d = d_val.object;
-            if (d.get("requests")) |v| {
-                if (v == .integer) total_requests = v.integer;
-            }
-            if (d.get("promptTokens")) |v| {
-                if (v == .integer) prompt_tokens = v.integer;
-            }
-            if (d.get("completionTokens")) |v| {
-                if (v == .integer) comp_tokens = v.integer;
-            }
-            if (d.get("cachedTokens")) |v| {
-                if (v == .integer) cached_tokens = v.integer;
-            }
-            if (d.get("cost")) |v| {
-                if (v == .float) total_cost = v.float else if (v == .integer) total_cost = @floatFromInt(v.integer);
-            }
-            if (d.get("byAccount")) |v| {
-                if (v == .object) by_account_map = v.object;
-            }
-        }
+    if (root.get("totalRequests")) |v| {
+        if (v == .integer) total_requests = v.integer;
+    }
+    if (root.get("totalPromptTokens")) |v| {
+        if (v == .integer) prompt_tokens = v.integer;
+    }
+    if (root.get("totalCompletionTokens")) |v| {
+        if (v == .integer) comp_tokens = v.integer;
+    }
+    if (root.get("totalCachedTokens")) |v| {
+        if (v == .integer) cached_tokens = v.integer;
+    }
+    if (root.get("totalCost")) |v| {
+        if (v == .float) total_cost = v.float else if (v == .integer) total_cost = @floatFromInt(v.integer);
     }
 
     const total_tokens = prompt_tokens + comp_tokens;
-    const total_tokens_fmt = try formatTokens(allocator, total_tokens);
+    const bar_text = try formatTokens(allocator, total_tokens);
 
-    var accounts: std.ArrayList(Account) = .empty;
-    defer accounts.deinit(allocator);
+    var accounts = std.ArrayList(Account).init(allocator);
+    defer accounts.deinit();
 
-    var quota_limited_count: i64 = 0;
+    if (root.get("byAccount")) |ba| {
+        if (ba == .object) {
+            var it = ba.object.iterator();
+            while (it.next()) |entry| {
+                if (entry.value_ptr.* != .object) continue;
+                const a = entry.value_ptr.object;
 
-    if (root_obj.get("connections")) |conns_val| {
-        if (conns_val == .array) {
-            for (conns_val.array.items) |c_val| {
-                if (c_val != .object) continue;
-                const c = c_val.object;
+                const raw_id = if (a.get("connectionId")) |v| (if (v == .string) v.string else entry.key_ptr.*) else entry.key_ptr.*;
+                const id = try allocator.dupe(u8, raw_id);
+                const raw_provider = if (a.get("provider")) |v| (if (v == .string) v.string else "unknown") else "unknown";
+                const provider = try allocator.dupe(u8, raw_provider);
+                const raw_name = if (a.get("accountName")) |v| (if (v == .string) v.string else "") else "";
+                const name = try allocator.dupe(u8, raw_name);
+                const email = if (name.len > 0) name else id;
 
-                var is_active = false;
-                if (c.get("isActive")) |ia| {
-                    if (ia == .bool) is_active = ia.bool;
+                var reqs: i64 = 0;
+                var p_tok: i64 = 0;
+                var c_tok: i64 = 0;
+                var cost: f64 = 0.0;
+
+                if (a.get("requests")) |v| {
+                    if (v == .integer) reqs = v.integer;
                 }
-                if (!is_active) continue;
-
-                const cid = if (c.get("id")) |v| (if (v == .string) v.string else "") else "";
-                const provider = if (c.get("provider")) |v| (if (v == .string) v.string else "") else "";
-                const name = if (c.get("name")) |v| (if (v == .string) v.string else "") else "";
-                const email = if (c.get("email")) |v| (if (v == .string) v.string else name) else name;
-                var priority: i64 = 99;
-                if (c.get("priority")) |v| {
-                    if (v == .integer) priority = v.integer;
+                if (a.get("promptTokens")) |v| {
+                    if (v == .integer) p_tok = v.integer;
                 }
-
-                var has_lock = false;
-                if (c.get("locks")) |v| {
-                    if (v == .object and v.object.count() > 0) has_lock = true;
+                if (a.get("completionTokens")) |v| {
+                    if (v == .integer) c_tok = v.integer;
                 }
-
-                var is_429 = false;
-                if (c.get("errorCode")) |v| {
-                    if (v == .integer and v.integer == 429) is_429 = true;
-                    if (v == .string and std.mem.eql(u8, v.string, "429")) is_429 = true;
-                }
-                if (c.get("lastError")) |v| {
-                    if (v == .string and std.mem.indexOf(u8, v.string, "quota") != null) is_429 = true;
+                if (a.get("cost")) |v| {
+                    if (v == .float) cost = v.float else if (v == .integer) cost = @floatFromInt(v.integer);
                 }
 
-                if (is_429 or has_lock) quota_limited_count += 1;
-
-                var acc_reqs: i64 = 0;
-                var acc_tokens: i64 = 0;
-                var acc_cost: f64 = 0.0;
-
-                if (by_account_map) |bam| {
-                    if (bam.get(cid)) |acc_u| {
-                        if (acc_u == .object) {
-                            const au = acc_u.object;
-                            if (au.get("requests")) |v| {
-                                if (v == .integer) acc_reqs = v.integer;
-                            }
-                            var p_tok: i64 = 0;
-                            var c_tok: i64 = 0;
-                            if (au.get("promptTokens")) |v| {
-                                if (v == .integer) p_tok = v.integer;
-                            }
-                            if (au.get("completionTokens")) |v| {
-                                if (v == .integer) c_tok = v.integer;
-                            }
-                            acc_tokens = p_tok + c_tok;
-                            if (au.get("cost")) |v| {
-                                if (v == .float) acc_cost = v.float else if (v == .integer) acc_cost = @floatFromInt(v.integer);
-                            }
-                        }
+                var found = false;
+                for (accounts.items) |*existing| {
+                    if (std.mem.eql(u8, existing.email, email)) {
+                        existing.requests += reqs;
+                        existing.tokens += (p_tok + c_tok);
+                        existing.cost += cost;
+                        found = true;
+                        break;
                     }
                 }
 
-                var status_label: []const u8 = "active";
-                if (is_429) {
-                    status_label = "quota 429";
-                } else if (has_lock) {
-                    status_label = "locked";
+                if (!found) {
+                    try accounts.append(.{
+                        .id = id,
+                        .provider = provider,
+                        .name = name,
+                        .email = email,
+                        .priority = 99,
+                        .status = "active",
+                        .isQuotaLimited = false,
+                        .requests = reqs,
+                        .tokens = p_tok + c_tok,
+                        .cost = cost,
+                    });
                 }
-
-                try accounts.append(allocator, .{
-                    .id = cid,
-                    .provider = provider,
-                    .name = name,
-                    .email = email,
-                    .priority = priority,
-                    .status = status_label,
-                    .isQuotaLimited = is_429 or has_lock,
-                    .requests = acc_reqs,
-                    .tokens = acc_tokens,
-                    .cost = acc_cost,
-                });
             }
         }
     }
 
     std.mem.sort(Account, accounts.items, {}, accountLessThan);
 
-    const bar_text = try std.fmt.allocPrint(allocator, "{s}", .{total_tokens_fmt});
+    var out = std.ArrayList(u8).init(allocator);
+    defer out.deinit();
 
-    var out_buf: std.ArrayList(u8) = .empty;
-    defer out_buf.deinit(allocator);
-
-    const header = try std.fmt.allocPrint(allocator,
+    try out.appendSlice(try std.fmt.allocPrint(allocator,
         \\{{
         \\  "online": true,
-        \\  "today": "{s}",
+        \\  "source": "api-zig",
+        \\  "today": "today",
         \\  "barText": "{s}",
-        \\  "dashboardUrl": "{s}",
+        \\  "dashboardUrl": "{s}/dashboard",
         \\  "gatewayHost": "{s}",
         \\  "totals": {{
         \\    "requests": {d},
@@ -311,30 +391,27 @@ pub fn main() !void {
         \\    "totalTokensFormatted": "{s}",
         \\    "cost": {d:.4},
         \\    "activeAccounts": {d},
-        \\    "quotaLimitedAccounts": {d}
+        \\    "quotaLimitedAccounts": 0
         \\  }},
         \\  "accounts": [
     , .{
-        today_str,
         bar_text,
-        dashboard_url,
+        base_url,
         gateway_host,
         total_requests,
         prompt_tokens,
         comp_tokens,
         cached_tokens,
         total_tokens,
-        total_tokens_fmt,
+        bar_text,
         total_cost,
         accounts.items.len,
-        quota_limited_count,
-    });
-    try out_buf.appendSlice(allocator, header);
+    }));
 
     for (accounts.items, 0..) |acc, i| {
         const tok_fmt = try formatTokens(allocator, acc.tokens);
-        if (i > 0) try out_buf.appendSlice(allocator, ",");
-        const row = try std.fmt.allocPrint(allocator,
+        if (i > 0) try out.appendSlice(",");
+        try out.appendSlice(try std.fmt.allocPrint(allocator,
             \\
             \\    {{
             \\      "id": "{s}",
@@ -344,7 +421,7 @@ pub fn main() !void {
             \\      "priority": {d},
             \\      "isActive": true,
             \\      "status": "{s}",
-            \\      "isQuotaLimited": {},
+            \\      "isQuotaLimited": false,
             \\      "requests": {d},
             \\      "tokens": {d},
             \\      "tokensFormatted": "{s}",
@@ -357,38 +434,19 @@ pub fn main() !void {
             acc.email,
             acc.priority,
             acc.status,
-            acc.isQuotaLimited,
             acc.requests,
             acc.tokens,
             tok_fmt,
             acc.cost,
-        });
-        try out_buf.appendSlice(allocator, row);
+        }));
     }
 
-    try out_buf.appendSlice(allocator,
-        \\
-        \\  ]
-        \\}
-    );
+    try out.appendSlice("\n  ]\n}");
 
-    const dir_path = try std.fmt.allocPrint(allocator, "{s}/.local/state/omarchy/9router", .{home});
-    const target_path = try std.fmt.allocPrint(allocator, "{s}/usage.json", .{dir_path});
-    const tmp_path = try std.fmt.allocPrint(allocator, "{s}/usage.json.tmp", .{dir_path});
-
-    const target_path_z = try allocator.dupeZ(u8, target_path);
-    const tmp_path_z = try allocator.dupeZ(u8, tmp_path);
-    const dir_path_z = try allocator.dupeZ(u8, dir_path);
-
-    _ = mkdir(dir_path_z.ptr, 0o755);
-
-    const f = fopen(tmp_path_z.ptr, "wb") orelse {
-        std.debug.print("Failed to open tmp file for write\n", .{});
-        return error.FileOpenFailed;
+    try writeFile(tmp_path, out.items);
+    std.fs.cwd().rename(tmp_path, usage_path) catch {
+        try writeFile(usage_path, out.items);
     };
-    _ = fwrite(out_buf.items.ptr, 1, out_buf.items.len, f);
-    _ = fclose(f);
-    _ = rename(tmp_path_z.ptr, target_path_z.ptr);
 
     std.debug.print("{{\"status\":\"ok\",\"barText\":\"{s}\",\"accounts\":{d}}}\n", .{ bar_text, accounts.items.len });
 }

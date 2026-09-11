@@ -50,7 +50,7 @@ When orchestrating multi-model AI coding agents (such as Hermes, Codex, Claude C
 Clone this repository into your user plugin folder:
 
 ```bash
-git clone https://github.com/<your-username>/omarchy-9router-widget.git ~/.config/omarchy/plugins/kinara.9router
+git clone https://github.com/kinarajv/omarchy-9router-widget.git ~/.config/omarchy/plugins/kinara.9router
 cd ~/.config/omarchy/plugins/kinara.9router
 ```
 

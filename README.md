@@ -101,9 +101,10 @@ Install directly from GitHub using the Omarchy CLI:
 omarchy plugin add https://github.com/kinarajv/omarchy-9router-widget.git --enable
 ```
 
-Then configure your endpoint:
+Compile the fetch runner from reviewed source and configure settings:
 ```bash
 cd ~/.config/omarchy/plugins/kinarajv.9router
+./build.sh
 cp config.example.json config.json
 nano config.json
 ```
@@ -116,15 +117,15 @@ git clone https://github.com/kinarajv/omarchy-9router-widget.git ~/.config/omarc
 cd ~/.config/omarchy/plugins/kinarajv.9router
 ```
 
+Compile from reviewed source:
+```bash
+./build.sh
+```
+
 Configure Settings:
 ```bash
 cp config.example.json config.json
 nano config.json
-```
-
-Build or verify the fetch executable:
-```bash
-./build.sh
 ```
 
 Enable the plugin:

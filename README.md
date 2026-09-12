@@ -2,6 +2,10 @@
 
 An ultra-lightweight Quickshell top-bar widget and interactive dashboard flyout for Omarchy Linux that tracks 9Router AI Gateway infrastructure, provider connection health, and live token usage quotas.
 
+<p align="center">
+  <img src="preview.png" alt="9Router AI Monitor Preview" width="100%">
+</p>
+
 ---
 
 ## Overview

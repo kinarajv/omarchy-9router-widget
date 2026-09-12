@@ -89,53 +89,43 @@ ROUTER_PASSWORD="your-9router-password"
 ---
 
 ## Installation & Setup
+ 
+### Method 1: Using the Omarchy Plugin Manager (Recommended)
+Install directly from GitHub using the Omarchy CLI:
 
-### 1. Clone into Omarchy Plugin Directory
+```bash
+omarchy plugin add https://github.com/kinarajv/omarchy-9router-widget.git --enable
+```
+
+Then configure your endpoint:
+```bash
+cd ~/.config/omarchy/plugins/kinarajv.9router
+cp config.example.json config.json
+nano config.json
+```
+
+### Method 2: Manual Installation
 Clone this repository into your user plugin folder:
 
 ```bash
-git clone https://github.com/kinarajv/omarchy-9router-widget.git ~/.config/omarchy/plugins/kinara.9router
-cd ~/.config/omarchy/plugins/kinara.9router
+git clone https://github.com/kinarajv/omarchy-9router-widget.git ~/.config/omarchy/plugins/kinarajv.9router
+cd ~/.config/omarchy/plugins/kinarajv.9router
 ```
 
-### 2. Configure Settings
-Copy and edit your configuration:
-
+Configure Settings:
 ```bash
 cp config.example.json config.json
 nano config.json
 ```
 
-### 3. Build the Fetch Runner
-Compile the native Zig poller:
-
+Build or verify the fetch executable:
 ```bash
 ./build.sh
 ```
 
-Run `./build.sh` to compile `fetch.zig` using Zig.
-
-### 4. Add to Omarchy Top Bar
-Open `~/.config/omarchy/shell.json` and insert `kinara.9router` into your bar configuration:
-
-```json
-{
-  "plugins": {
-    "bar": [
-      "omarchy.workspace-switcher",
-      "kinara.9router",
-      "omarchy.media-player",
-      "omarchy.clock"
-    ]
-  }
-}
-```
-
-### 5. Reload the Shell
-Trigger Quickshell to load the new widget:
-
+Enable the plugin:
 ```bash
-quickshell ipc -p /usr/share/omarchy/shell call kinara.9router open 2>/dev/null || systemctl --user restart quickshell
+omarchy plugin enable kinarajv.9router
 ```
 
 ---
@@ -174,11 +164,18 @@ cat ~/.local/state/omarchy/9router/usage.json | head -n 30
 ---
 
 ## Uninstallation
+ 
+### Using the Plugin Manager:
+```bash
+omarchy plugin disable kinarajv.9router
+omarchy plugin remove kinarajv.9router --yes
+```
 
-1. Remove `kinara.9router` from `~/.config/omarchy/shell.json`.
+### Manual Removal:
+1. Remove `kinarajv.9router` from `~/.config/omarchy/shell.json`.
 2. Delete the plugin directory:
    ```bash
-   rm -rf ~/.config/omarchy/plugins/kinara.9router
+   rm -rf ~/.config/omarchy/plugins/kinarajv.9router
    ```
 3. Restart Quickshell:
    ```bash

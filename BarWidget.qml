@@ -43,7 +43,12 @@ Panel {
 
   Process {
     id: fetchProcess
-    command: [Quickshell.env("HOME") + "/.config/omarchy/plugins/kinara.9router/fetch"]
+    command: [
+      "bash", "-c",
+      'for p in "$1/fetch" "$HOME/.config/omarchy/plugins/kinarajv.9router/fetch" "$HOME/.config/omarchy/plugins/kinara.9router/fetch"; do [ -x "$p" ] && exec "$p"; done',
+      "_",
+      Qt.resolvedUrl(".").toString().replace(/^file:\/\//, "").replace(/\/$/, "")
+    ]
   }
 
   Timer {

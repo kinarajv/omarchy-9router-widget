@@ -43,14 +43,93 @@ fn writeFile(path: []const u8, data: []const u8) !void {
     try file.writeAll(data);
 }
 
+fn writePrivateSessionFile(dir_path: []const u8, filename: []const u8, data: []const u8) !void {
+    const tmp_name = "session.json.tmp";
+
+    var dir = try std.fs.cwd().openDir(dir_path, .{ .no_follow = true });
+    defer dir.close();
+
+    const dir_stat = try dir.stat();
+    if (dir_stat.kind != .directory) return error.NotADirectory;
+
+    const flags: std.posix.O = .{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .TRUNC = true,
+        .NOFOLLOW = true,
+    };
+    const fd = try std.posix.openat(dir.fd, tmp_name, flags, 0o600);
+    defer std.posix.close(fd);
+
+    var written: usize = 0;
+    while (written < data.len) {
+        const n = try std.posix.write(fd, data[written..]);
+        if (n == 0) break;
+        written += n;
+    }
+
+    try std.posix.fsync(fd);
+    try std.posix.renameat(dir.fd, tmp_name, dir.fd, filename);
+}
+
+fn readPrivateSessionCookie(allocator: std.mem.Allocator, dir_path: []const u8, filename: []const u8) ?[]const u8 {
+    var dir = std.fs.cwd().openDir(dir_path, .{ .no_follow = true }) catch return null;
+    defer dir.close();
+
+    const fd = std.posix.openat(dir.fd, filename, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true }, 0) catch return null;
+    const file = std.fs.File{ .handle = fd };
+    defer file.close();
+
+    const stat = file.stat() catch return null;
+    if (stat.kind != .file) return null;
+
+    const raw = file.readToEndAlloc(allocator, 64 * 1024) catch return null;
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch return null;
+    defer parsed.deinit();
+
+    if (parsed.value == .object) {
+        if (parsed.value.object.get("cookie")) |c| {
+            if (c == .string and c.string.len > 0) {
+                return allocator.dupe(u8, c.string) catch null;
+            }
+        }
+    }
+    return null;
+}
+
+fn jsonEscapeString(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
+    var out = std.ArrayList(u8).init(allocator);
+    defer out.deinit();
+
+    for (input) |c| {
+        switch (c) {
+            '"' => try out.appendSlice("\\\""),
+            '\\' => try out.appendSlice("\\\\"),
+            '\n' => try out.appendSlice("\\n"),
+            '\r' => try out.appendSlice("\\r"),
+            '\t' => try out.appendSlice("\\t"),
+            else => {
+                if (c < 0x20) {
+                    try out.appendSlice(try std.fmt.allocPrint(allocator, "\\u{x:0>4}", .{c}));
+                } else {
+                    try out.append(c);
+                }
+            },
+        }
+    }
+    return try allocator.dupe(u8, out.items);
+}
+
 const Config = struct {
     target: []const u8,
     password: []const u8,
+    allow_insecure_http: bool = false,
 };
 
 fn loadConfig(allocator: std.mem.Allocator, home: []const u8, exe_dir: ?[]const u8) !Config {
     var target: []const u8 = "";
     var password: []const u8 = "";
+    var allow_insecure_http: bool = false;
 
     var paths = std.ArrayList([]const u8).init(allocator);
     defer paths.deinit();
@@ -78,24 +157,54 @@ fn loadConfig(allocator: std.mem.Allocator, home: []const u8, exe_dir: ?[]const 
                         password = try allocator.dupe(u8, v.string);
                     }
                 }
+                if (obj.get("allowInsecureHttp")) |v| {
+                    if (v == .bool) {
+                        allow_insecure_http = v.bool;
+                    }
+                }
             }
         }
     }
 
     if (std.posix.getenv("ROUTER_TARGET")) |v| target = try allocator.dupe(u8, v);
     if (std.posix.getenv("ROUTER_PASSWORD")) |v| password = try allocator.dupe(u8, v);
+    if (std.posix.getenv("ROUTER_ALLOW_INSECURE_HTTP")) |v| {
+        allow_insecure_http = std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "true");
+    }
 
-    return .{ .target = target, .password = password };
+    return .{ .target = target, .password = password, .allow_insecure_http = allow_insecure_http };
+}
+
+fn isLoopbackHost(host: []const u8) bool {
+    if (std.mem.eql(u8, host, "127.0.0.1")) return true;
+    if (std.mem.eql(u8, host, "localhost")) return true;
+    if (std.mem.eql(u8, host, "::1")) return true;
+    if (std.mem.eql(u8, host, "[::1]")) return true;
+    return false;
 }
 
 fn normalizeBaseUrl(allocator: std.mem.Allocator, target: []const u8) ![]const u8 {
-    const has_scheme = std.mem.startsWith(u8, target, "http://") or std.mem.startsWith(u8, target, "https://");
-    const clean_raw = if (has_scheme)
-        try allocator.dupe(u8, target)
-    else
-        try std.fmt.allocPrint(allocator, "http://{s}", .{target});
+    const has_http = std.mem.startsWith(u8, target, "http://");
+    const has_https = std.mem.startsWith(u8, target, "https://");
 
-    var clean = clean_raw;
+    var clean: []const u8 = undefined;
+
+    if (has_http or has_https) {
+        clean = try allocator.dupe(u8, target);
+    } else {
+        const host_part = if (std.mem.indexOfScalar(u8, target, '/')) |idx|
+            target[0..idx]
+        else
+            target;
+        const host_only = if (std.mem.indexOfScalar(u8, host_part, ':')) |idx|
+            host_part[0..idx]
+        else
+            host_part;
+
+        const default_scheme = if (isLoopbackHost(host_only)) "http://" else "https://";
+        clean = try std.fmt.allocPrint(allocator, "{s}{s}", .{ default_scheme, target });
+    }
+
     if (std.mem.endsWith(u8, clean, "/")) {
         clean = clean[0 .. clean.len - 1];
     }
@@ -145,7 +254,6 @@ pub fn main() !void {
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/.local/state/omarchy/9router", .{home});
     std.fs.cwd().makePath(dir_path) catch {};
 
-    const session_path = try std.fmt.allocPrint(allocator, "{s}/session.json", .{dir_path});
     const usage_path = try std.fmt.allocPrint(allocator, "{s}/usage.json", .{dir_path});
     const tmp_path = try std.fmt.allocPrint(allocator, "{s}/usage.json.tmp", .{dir_path});
 
@@ -167,17 +275,33 @@ pub fn main() !void {
     const base_url = try normalizeBaseUrl(allocator, cfg.target);
     const gateway_host = extractHost(base_url);
 
-    var saved_cookie: []const u8 = "";
-    if (readFileAlloc(allocator, session_path)) |raw| {
-        var parsed = std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch null;
-        if (parsed) |*p| {
-            defer p.deinit();
-            if (p.value == .object) {
-                if (p.value.object.get("cookie")) |c| {
-                    if (c == .string and c.string.len > 0) {
-                        saved_cookie = try allocator.dupe(u8, c.string);
-                    }
-                }
+    var saved_cookie = readPrivateSessionCookie(allocator, dir_path, "session.json") orelse "";
+
+    if (cfg.password.len > 0 or saved_cookie.len > 0) {
+        if (std.mem.startsWith(u8, base_url, "http://")) {
+            const host_only = if (std.mem.indexOfScalar(u8, gateway_host, ':')) |idx|
+                gateway_host[0..idx]
+            else
+                gateway_host;
+
+            const allow_insecure = cfg.allow_insecure_http or (if (std.posix.getenv("ROUTER_ALLOW_INSECURE_HTTP")) |v|
+                std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "true")
+            else
+                false);
+
+            if (!isLoopbackHost(host_only) and !allow_insecure) {
+                const err_json = try std.fmt.allocPrint(allocator,
+                    \\{{
+                    \\  "online": false,
+                    \\  "source": "api-zig",
+                    \\  "error": "Insecure transport: credentials require HTTPS for non-loopback target",
+                    \\  "dashboardUrl": "{s}/dashboard",
+                    \\  "gatewayHost": "{s}"
+                    \\}}
+                , .{ base_url, gateway_host });
+                try writeFile(usage_path, err_json);
+                std.debug.print("{{\"status\":\"error\",\"barText\":\"\",\"accounts\":0,\"error\":\"Insecure transport: credentials require HTTPS for non-loopback target\"}}\n", .{});
+                return;
             }
         }
     }
@@ -185,10 +309,10 @@ pub fn main() !void {
     var client: std.http.Client = .{ .allocator = allocator };
     defer client.deinit();
 
-    // If password is configured, attempt login when no saved cookie or if refreshed
     if (saved_cookie.len == 0 and cfg.password.len > 0) {
         const login_url = try std.fmt.allocPrint(allocator, "{s}/api/auth/login", .{base_url});
-        const login_body = try std.fmt.allocPrint(allocator, "{{\"password\":\"{s}\"}}", .{cfg.password});
+        const escaped_pw = try jsonEscapeString(allocator, cfg.password);
+        const login_body = try std.fmt.allocPrint(allocator, "{{\"password\":\"{s}\"}}", .{escaped_pw});
         var resp_buf = std.ArrayList(u8).init(allocator);
         defer resp_buf.deinit();
 
@@ -211,8 +335,9 @@ pub fn main() !void {
                 const cookie_part = headers_str[idx..];
                 const end_idx = std.mem.indexOfAny(u8, cookie_part, ";\r\n") orelse cookie_part.len;
                 saved_cookie = try allocator.dupe(u8, cookie_part[0..end_idx]);
-                const save_payload = try std.fmt.allocPrint(allocator, "{{\"cookie\":\"{s}\"}}", .{saved_cookie});
-                writeFile(session_path, save_payload) catch {};
+                const escaped_cookie = try jsonEscapeString(allocator, saved_cookie);
+                const save_payload = try std.fmt.allocPrint(allocator, "{{\"cookie\":\"{s}\"}}", .{escaped_cookie});
+                writePrivateSessionFile(dir_path, "session.json", save_payload) catch {};
             }
         }
     }

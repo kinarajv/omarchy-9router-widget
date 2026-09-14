@@ -41,14 +41,57 @@ Panel {
     }
   }
 
+  function pluginFile(relative) {
+    var url = String(Qt.resolvedUrl(relative))
+    if (url.indexOf("file://") === 0) url = url.slice(7)
+    try { url = decodeURIComponent(url) } catch (e) {}
+    return url
+  }
+  readonly property string fetchExecutable: pluginFile("fetch")
+
+  readonly property var childEnvironment: ({
+    "HOME": null,
+    "PATH": "/usr/bin:/bin",
+    "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8"
+  })
+
+  function triggerFetch() {
+    if (!fetchProcess.running) {
+      fetchProcess.bytesRead = 0
+      fetchProcess.running = true
+      fetchWatchdog.restart()
+    }
+  }
+
   Process {
     id: fetchProcess
-    command: [
-      "bash", "-c",
-      'for p in "$1/fetch" "$HOME/.config/omarchy/plugins/kinarajv.9router/fetch" "$HOME/.config/omarchy/plugins/kinara.9router/fetch"; do [ -x "$p" ] && exec "$p"; done',
-      "_",
-      Qt.resolvedUrl(".").toString().replace(/^file:\/\//, "").replace(/\/$/, "")
-    ]
+    command: [root.fetchExecutable]
+    environment: root.childEnvironment
+    clearEnvironment: true
+    property int bytesRead: 0
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        fetchProcess.bytesRead += chunk.length
+        if (fetchProcess.bytesRead > 4096) {
+          fetchProcess.running = false
+        }
+      }
+    }
+    onExited: {
+      fetchWatchdog.stop()
+      fetchProcess.bytesRead = 0
+    }
+  }
+
+  Timer {
+    id: fetchWatchdog
+    interval: 8000
+    repeat: false
+    onTriggered: {
+      if (fetchProcess.running) fetchProcess.running = false
+    }
   }
 
   Timer {
@@ -56,13 +99,11 @@ Panel {
     running: true
     repeat: true
     triggeredOnStart: true
-    onTriggered: {
-      if (!fetchProcess.running) fetchProcess.running = true
-    }
+    onTriggered: root.triggerFetch()
   }
 
   onOpenedChanged: if (opened) {
-    if (!fetchProcess.running) fetchProcess.running = true
+    root.triggerFetch()
   }
 
   Component.onCompleted: {
@@ -70,7 +111,7 @@ Panel {
       var content = statusWatcher.text()
       if (content) root.statusData = JSON.parse(content)
     } catch (e) {}
-    if (!fetchProcess.running) fetchProcess.running = true
+    root.triggerFetch()
   }
 
   IpcHandler {
@@ -79,7 +120,7 @@ Panel {
     function close(): void { root.close() }
     function toggle(): void { root.toggle() }
     function refresh(): string {
-      if (!fetchProcess.running) fetchProcess.running = true
+      root.triggerFetch()
       return "ok"
     }
   }
@@ -346,7 +387,7 @@ Panel {
               width: (parent.width - Style.spacing.md) / 2
               text: "Refresh Data"
               onClicked: {
-                if (!fetchProcess.running) fetchProcess.running = true
+                root.triggerFetch()
               }
             }
           }

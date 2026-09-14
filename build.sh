@@ -11,5 +11,6 @@ fi
 
 echo "Building fetch using Zig..."
 zig build-exe -O ReleaseSmall fetch.zig
+rm -f fetch.o
 chmod +x fetch
 echo "Build successful: ./fetch ($(stat -c%s fetch 2>/dev/null || stat -f%z fetch) bytes)"
